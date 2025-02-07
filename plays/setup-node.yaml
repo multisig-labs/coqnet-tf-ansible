@@ -1,0 +1,138 @@
+# this play should download the Docker image
+# set up the directories for the container
+# download the subnet EVM binary to the plugin subdirectory
+# and start the container
+
+# we need to download the image avaplatform/avalanchego:latest
+# we will store configs to /home/ubuntu/avalanche
+# subnetevm needs downloaded to /home/ubuntu/avalanche/plugins
+
+- name: Download Docker Image
+  hosts: coqnet
+  remote_user: ubuntu
+  become: yes
+  tasks:
+    - name: Pull AvalancheGo Docker image
+      docker_image:
+        name: avaplatform/avalanchego:latest
+        source: pull
+
+- name: Set up directories
+  hosts: coqnet
+  remote_user: ubuntu
+  become: yes
+  tasks:
+    - name: Create Avalanche directory
+      file:
+        path: /home/ubuntu/avalanche
+        state: directory
+        mode: "0755"
+
+- name: Download and extract the latest subnet-evm release
+  hosts: coqnet
+  become: yes
+
+  vars:
+    download_dir: "/tmp"
+    dest_dir: "/home/ubuntu/avalanche/plugins"
+    repo_owner: "ava-labs"
+    repo_name: "subnet-evm"
+    asset_pattern: "linux_amd64"
+    vm_id: "knwdavfavsrcds7PKZmVBd5iZGXkhRQsC9xUHzSNHdegDCWBL"
+
+  tasks:
+    - name: Fetch the latest release info from GitHub
+      uri:
+        url: "https://api.github.com/repos/{{ repo_owner }}/{{ repo_name }}/releases/latest"
+        method: GET
+        return_content: yes
+        headers:
+          Accept: application/vnd.github.v3+json
+      register: release_info
+
+    - name: Parse JSON to get the matching asset URL
+      set_fact:
+        asset_url: "{{ release_info.json.assets | selectattr('name', 'contains', asset_pattern) | map(attribute='browser_download_url') | first }}"
+      when: release_info.json.assets is defined and release_info.json.assets | selectattr('name', 'contains', asset_pattern) | list | length > 0
+
+    - name: Ensure destination directory exists
+      file:
+        path: "{{ dest_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Download the release asset
+      get_url:
+        url: "{{ asset_url }}"
+        dest: "{{ download_dir }}/subnet-evm.tar.gz"
+        mode: "0644"
+      when: asset_url is defined
+
+    - name: Extract the subnet-evm binary
+      unarchive:
+        src: "{{ download_dir }}/subnet-evm.tar.gz"
+        dest: "{{ dest_dir }}"
+        remote_src: yes
+      when: asset_url is defined
+
+    - name: Ensure the subnet-evm binary is executable
+      file:
+        path: "{{ dest_dir }}/subnet-evm"
+        state: file
+        mode: "0755"
+
+    - name: Rename the plugin binary to match the VM ID
+      command: mv "{{ dest_dir }}/subnet-evm" "{{ dest_dir }}/{{ vm_id }}"
+      args:
+        creates: "{{ dest_dir }}/{{ vm_id }}"
+      when: asset_url is defined
+
+    - name: Remove everything but the plugin binary
+      find:
+        paths: "{{ dest_dir }}"
+        file_type: any
+      register: found_items
+
+    - name: Delete all items except the plugin binary
+      file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ found_items.files }}"
+      when: item.path | basename != "{{ vm_id }}"
+
+- name: "Start The Node"
+  hosts: coqnet
+  remote_user: ubuntu
+  become: yes
+  tasks:
+    - name: Start the AvalancheGo container
+      docker_container:
+        name: avalanche-node
+        image: avaplatform/avalanchego:latest
+        state: started
+        restart_policy: always
+        volumes:
+          - /home/ubuntu/avalanche:/avalanche
+        ports:
+          - "9650:9650"
+          - "9651:9651"
+        # we need to define the rather long startup command
+        command: |
+          /avalanchego/build/avalanchego
+            --http-host=0.0.0.0
+            --http-port=9650
+            --data-dir=/avalanche
+            --network-id=fuji
+            --track-subnets=4YurNFwLzhGUrYyihDnUUc2L199YBnFeWP3fhJKmDDjkbvy8G
+            --partial-sync-primary-network
+
+    - name: Wait for the AvalancheGo container to start
+      wait_for:
+        host: localhost
+        port: 9650
+        delay: 5
+        timeout: 60
+        state: started
+        connect_timeout: 5
+        sleep: 5
+        msg: "AvalancheGo container is not ready yet"
