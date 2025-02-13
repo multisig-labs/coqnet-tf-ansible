@@ -105,6 +105,14 @@
   remote_user: ubuntu
   become: yes
   tasks:
+    - name: Fetch IP address using shell command
+      shell: "curl --silent ipinfo.io/ip"
+      register: ip_address_result
+
+    - name: Set the IP address to a variable
+      set_fact:
+        current_ip: "{{ ip_address_result.stdout }}"
+
     - name: Start the AvalancheGo container
       docker_container:
         name: avalanche-node
@@ -121,6 +129,7 @@
           /avalanchego/build/avalanchego
             --http-host=0.0.0.0
             --http-port=9650
+            --public-ip={{ current_ip }}
             --data-dir=/avalanche
             --network-id=fuji
             --track-subnets=4YurNFwLzhGUrYyihDnUUc2L199YBnFeWP3fhJKmDDjkbvy8G
